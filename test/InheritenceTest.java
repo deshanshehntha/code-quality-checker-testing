@@ -8,7 +8,12 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-class MainTest {
+class InheritenceTest {
+
+
+    //create test classses and call your services like below,
+    //i added all the services please add the missing ones, remove the annotations and loggers
+    //copy this class and add your services
 
     private static String filePath = "D:\\code-quality-checker-for-inheritence\\src\\test.txt";
 
