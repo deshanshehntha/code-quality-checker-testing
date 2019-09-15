@@ -1,0 +1,1602 @@
+public class OrderWindow extends AbstractPlugin implements SymbolSearchEventListener, SpinnerValueChangeNotifier, OrderInterface, Linkable, PropertyChangeListener, DfnObserver, ITradeConnect {
+    private JPanel leftPanel;
+    private JPanel mainOrderPanel;
+    private JPanel mainPanel;
+    private CollapsiblePane rightPanel;
+    private JScrollPane scrollPane;
+
+    private OrderWindowModel model;
+    private OrderWindowModel prevModel;
+    private OrderDataObject orderDataObject;
+
+    private Stock stock;
+    private static StockDataStore stockStore;
+
+    private static final int EXPANDED_WIDTH = 900;
+    private static final int NORMAL_WIDTH = 488;
+    private static final int NORMAL_HEIGHT = 420;
+
+    private OWTopPanel topPanel;
+    private OWPortfolioPanel portfolioPanel;
+    private OWPricePanel pricePanel;
+    private TradingPanelHandler tradingPanelHandler;
+    private OWTradeInfoPanel tradeInfoPanel;
+    private OWButtonPanel owButtonPanel;
+
+    private ValidationLogicFactory validationLogicFactory;
+    private OWComponentHandler owComponentHandler;
+    private ActionHandler actionHandler;
+
+    private boolean isExpanded = false;
+    private boolean statusSet = false;
+    private boolean maxQtyRequested;
+    private boolean isCancelOrAmendMode = false;
+    private boolean marginBuyingPowerRequested;
+
+    private HashMap<String, Component> focusableComponentsMap;
+    private LinkedList<String> currentComponentsFocusCycle;
+
+    private LinkedList<String> marketComponentsFocusCycle;
+
+    private int decimalPlaces = 2;
+    private int currentFocusTraversalKey;
+
+    private String action = OrderWindowConstants.BUY_ACTION;
+
+    private NumberFormat numberFormat = NumberFormat.getNumberInstance();
+    private DfnDecimalFormat decimalFormat2 = DfnRenderingManger.getDecimalFormat(decimalPlaces);
+
+    private Object[] reloadingParams;
+    private SavedOrderWindowProperties savedState;
+    private SavedOrderWindowProperties defaultState;
+    private KeyEventDispatcher dispatcher;
+
+    private String oriSymbolKey;
+    private String baseSymbolKey;
+
+    static {
+        stockStore = (StockDataStore) DataStoreContext.get((short) IConstants.RESPONSE_OMM_MODEL.RESPONSE_INDEX_MESSAGE_MODEL);
+    }
+
+    public OrderWindow() {
+        linkGroup = "unlink";
+        initialize();
+    }
+
+    private void initialize() {
+        actionHandler = new ActionHandler();
+
+        SubPanelFactory subPanelFactory = new SubPanelFactory(this);
+        topPanel = subPanelFactory.getTopSubPanel();
+        portfolioPanel = subPanelFactory.getPortfolioSubPanel();
+        pricePanel = subPanelFactory.getPriceSubPanel();
+        tradingPanelHandler = subPanelFactory.getTradingPanel();
+        tradeInfoPanel = subPanelFactory.getTradeInfoPanel();
+        owButtonPanel = subPanelFactory.getButtonPanel();
+
+        validationLogicFactory = new ValidationLogicFactory(this);
+        owComponentHandler = new OWComponentHandler(this);
+    }
+
+    @Override
+    public void setStatus(Object[] status) {
+        addDatastoreObservers();
+        createUI();
+        setBackgroundColor();
+        setFontColor();
+
+        statusSet = true;
+        if (reloadingParams != null) {
+            reload(reloadingParams);
+            reloadingParams = null;
+        }
+
+        try {
+            if (status != null && status.length > 0) {
+                if (status[0] != null && !SharedMethods.isNullOrEmptyString((String) status[0])) {
+                    savedState = new Gson().fromJson((String) status[0], SavedOrderWindowProperties.class);
+                }
+
+                if (status[1] != null) { //plugin id setting is a must - used to keep track of requests.
+                    setPluginId(Integer.parseInt(status[1].toString()));
+                }
+
+                if (status[5] != null && status[5] instanceof SymbolSearchObject) { //Used to pass fired symbol search object
+                    changeSymbol((SymbolSearchObject) status[5]);
+                }
+            }
+
+            if (savedState == null) {
+                savedState = defaultState;
+            }
+
+            if (savedState != null) {
+                rightPanel.setCollapsed(savedState.isCollapsed());
+                isExpanded = savedState.isCollapsed();
+            }
+
+            setRenderers();
+        } catch (Exception e) {
+            TradeCoreLogger.error(OrderWindow.class, "[setStatus()]", e);
+        }
+
+        GUISettings.applyOrientation(this);
+        Theme.getSharedInstance().registerComponent(this);
+        LinkStore.getSharedInstance().add(linkGroup, this);
+        ComponentUpdateContext.getInstance().put(Constants.ThreadTypes.THREE_HUNDRED_MILLISECONDS, this);
+        TradeComponentUpdateContext.getSharedInstance().putTradeLabel(Constants.ThreadTypes.THREE_HUNDRED_MILLISECONDS, this);
+
+        if (!AppConfig.isNCBC()) {
+            if (getParentContainer() != null) {
+                getParentContainer().setPreferredSize(new Dimension(getComponentWidth(), getComponentHeight()));
+                getParentContainer().setBounds(getParentContainer().getLocation().x, getParentContainer().getLocation().y, getComponentWidth(), getComponentHeight());
+            }
+        }
+
+        SwingUtilities.invokeLater(new Runnable() {
+            @Override
+            public void run() {
+                sendInitialRequests();
+            }
+        });
+    }
+
+    private void sendInitialRequests() {
+        TradeSharedMethods.getSharedInstance().sendBuyingPowerRequest(getSelectedPortfolio());
+    }
+
+    public void createUI() {
+        setLayout(new BorderLayout());
+        mainPanel = new JPanel(new FormLayout("fill:pref,2dlu,fill:pref:grow", "fill:pref:grow"));
+        leftPanel = new JPanel(new FormLayout("2dlu,fill:pref,2dlu,fill:pref:grow", "3dlu,fill:pref:grow,3dlu,fill:pref:grow,fill:pref:grow,fill:pref"));
+
+        setPreferredSize(new Dimension(450, NORMAL_HEIGHT));
+
+        createCollapsiblePane();
+
+        createTopPanel();
+
+        mainOrderPanel = new JPanel(new FormLayout("fill:pref:grow", "fill:pref,2dlu,fill:pref,2dlu,fill:pref,2dlu,fill:pref"));
+        leftPanel.add(mainOrderPanel, CC.xy(2, 4));
+
+        createPortfoilioPanel();
+        createPricePanel();
+        createOrderPanel();
+        createTradeInfoPanel();
+        createButtonPanel();
+
+        changePanelColors(action);
+
+        leftPanel.setBorder(BorderFactory.createLineBorder(Color.BLACK));
+        mainPanel.add(getRightPanel(), CC.xy(3, 1));
+        mainPanel.add(leftPanel, CC.xy(1, 1));
+        scrollPane = new JScrollPane(mainPanel, JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED, JScrollPane.HORIZONTAL_SCROLLBAR_AS_NEEDED);
+
+        add(scrollPane);
+
+        repaint();
+
+        try {
+            createComponentMap(((KeyValue<String>) getSidePanel().getSelectedComponentItem()).getKey());
+            loadFocusCycleSettings();
+            loadFocusTraversalKey();
+            setCustomFocusTraversalPolicy(currentComponentsFocusCycle);
+            setCustomFocusTraversalKey(currentFocusTraversalKey);
+        } catch (Exception e) {
+            TradeCoreLogger.error(OrderWindow.class, "error in focus cycle", e);
+        }
+
+        tradingPanelHandler.changeSideAtStartup();
+        // do all the changes depends on the side (buy/sell)
+        changesDependOnSide(OrderWindowSharedMethods.getSharedInstance().getSideValue(action));
+
+        if (getParentContainer() instanceof JInternalFrame) {
+            ((JInternalFrame) getParentContainer()).setResizable(true);
+            ((JInternalFrame) getParentContainer()).setMaximizable(false);
+        }
+
+        dispatcher = new KeyEventDispatcher() {
+            @Override
+            public boolean dispatchKeyEvent(KeyEvent e) {
+                Object source = e.getSource();
+                if (e.getID() == KeyEvent.KEY_PRESSED && e.getKeyCode() == KeyEvent.VK_ENTER) {
+                    if (currentFocusTraversalKey != KeyEvent.VK_ENTER) {
+                        if (!((source instanceof SymbolSearchUI) || source instanceof SymbolSearchField) && OrderWindow.this.getFocusCycleRootAncestor().equals(((Component) source).getFocusCycleRootAncestor())) {
+                            tradingPanelHandler.enterKeyAction(action);
+                            return true;
+                        }
+                    } else {
+                        if ((source instanceof SymbolSearchUI) || (source instanceof SymbolSearchField)) {
+                            try {
+                                setCustomFocusTraversalKey(KeyEvent.VK_TAB);
+                                setCurrentFocusTraversalKey(KeyEvent.VK_ENTER);
+                            } catch (Exception ex) {
+                                TradeCoreLogger.error(OrderWindow.class, "Error in setting travesal key", ex);
+                            }
+                        }
+                    }
+                }
+                return false;
+            }
+        };
+        KeyboardFocusManager.getCurrentKeyboardFocusManager().addKeyEventDispatcher(dispatcher);
+        if (!UIContext.getSharedInstance().getComponentOrientation().isLeftToRight()) {
+            scrollPane.applyComponentOrientation(ComponentOrientation.RIGHT_TO_LEFT);
+        }
+    }
+
+    private void createCollapsiblePane() {
+        JPanel colPanel = new JPanel(new FormLayout("fill:pref:grow", "2dlu,fill:pref,2dlu,fill:pref,2dlu,fill:pref:grow,2dlu"));
+
+        //======== marketDepth ========
+        colPanel.add(owComponentHandler.getBidAskTablePanel(), CC.xy(1, 2));
+
+        //======== timeNSalesPanel ========
+        colPanel.add(owComponentHandler.getTnSTablePanel(), CC.xy(1, 4));
+
+        //======== chart ========
+        colPanel.add(owComponentHandler.getChartPanel(), CC.xy(1, 6));
+
+        rightPanel = new CollapsiblePane();
+        getRightPanel().setLayout(new BorderLayout());
+        getRightPanel().setSlidingDirection(SwingConstants.EAST);
+        getRightPanel().setContentPane(colPanel);
+        getRightPanel().setShowTitleBar(false);
+    }
+
+    private void setRenderers() {
+        tradingPanelHandler.setRenderers();
+    }
+
+    public void changePanelColors(String action) {
+        portfolioPanel.changePanelColors(action);
+        tradingPanelHandler.changePanelColors(action);
+    }
+
+    private void createTopPanel() {
+        leftPanel.add(topPanel.createUI(), CC.xyw(2, 2, 3));
+    }
+
+    private void createPortfoilioPanel() {
+        mainOrderPanel.add(portfolioPanel.createUI(), CC.xy(1, 1));
+    }
+
+    private void createPricePanel() {
+        mainOrderPanel.add(pricePanel.createUI(), CC.xy(1, 3));
+    }
+
+    private void createOrderPanel() {
+        mainOrderPanel.add(tradingPanelHandler.getTradingPanel(), CC.xy(1, 5));
+    }
+
+    private void createTradeInfoPanel() {
+        mainOrderPanel.add(tradeInfoPanel.createUI(), CC.xy(1, 7));
+    }
+
+    private void createButtonPanel() {
+        leftPanel.add(owButtonPanel.createUI(), CC.xy(2, 6));
+    }
+
+    public void fireSymbolChanged(SymbolSearchObject object) {
+        try {
+            if (object != null) {
+                AccountSummaryUpdater.getSharedInstance().init();
+            }
+        } catch (Exception e) {
+            TradeCoreLogger.error(OrderWindow.class, "Error--AccountSummaryUpdater-init", e);
+        }
+
+        //if selected portfolio is margin enable send request fro the buying power
+        sendMarginBuyingPower(object);
+
+        if (getSymbolSearchedObject() != null) { // stop quote requests for previous symbol
+            SwingUtilities.invokeLater(new Runnable() {
+                @Override
+                public void run() {
+                    actionHandler.stopQuoteRequests(getSymbolSearchedObject());
+                }
+            });
+        }
+
+        setSymbolSearchObject(object);
+
+        if (object != null) {
+            try {
+                changeSymbolKey(object.getSymbolKey());
+            } catch (Exception e) {
+                TradeCoreLogger.error(OrderWindow.class, "Error--changeSymbolKey", e);
+            }
+
+            if (SharedMethods.isNullOrEmptyString(pricePanel.getSymbolSearchUI().getSymbolKey())) {
+                final String sybl = object.getSymbol();
+                SwingUtilities.invokeLater(new Runnable() {
+                    @Override
+                    public void run() {
+                        pricePanel.getSymbolSearchUI().getSearchField().setOverlayText(sybl);
+                        pricePanel.getSymbolSearchUI().transferFocus();
+                    }
+                });
+            }
+
+            final SymbolSearchObject ssObject = object;
+            SwingUtilities.invokeLater(new Runnable() {
+                @Override
+                public void run() {
+                    RealTimePriceDataContext.sendQuoteRequest(ssObject.getSymbolKey(), ssObject.getInsType());
+                }
+            });
+
+            SwingUtilities.invokeLater(new Runnable() {
+                @Override
+                public void run() {
+                    portfolioPanel.setSymbolRelatedPortfolio(ssObject);
+                }
+            });
+
+            stock = stockStore.get(object.getSymbolKey());
+
+            getTheModel();
+            /// reload tiff values for exchange
+            if (!isCancelOrAmendMode) {
+                try {
+                    tradingPanelHandler.reFillTiffCombo(object.getExchange(), model);
+                    setInitialGoodTill(object.getExchange(), model);
+                } catch (Exception e) {
+                    TradeCoreLogger.error(OrderWindow.class, "Error--TIFF", e);
+                }
+                ////////change the price spinner value../////////////////
+                tradingPanelHandler.updatePriceSpinnerOnSymbolChange(object, stock);
+            } else {
+                if (actionHandler.isPriceFieldReceived(object.getSymbolKey()) && tradingPanelHandler.getPriceDecimalPlaces(object, stock) != getDecimalPlaces()) {
+                    decimalPlaces = tradingPanelHandler.getPriceDecimalPlaces(object, stock);
+                }
+            }
+
+            // display only the Limit Order type when Trade At Lsat session for TDWL
+            try {
+                boolean check;
+                int mktStatus = MarketSummeryDataStore.getSharedInstance().getMarketStatus(object.getExchange());
+                Interpreter engine = new Interpreter();
+                engine.set("mktstatus", mktStatus);
+                Rule rule = RuleManager.getSharedInstance().getRule(RuleManager.DFNRules.RULE_ENABLE_FEATURES_FOR_MARKET_STATUS, object.getExchange(), RuleManager.DFNRuleCategories.RULE_CAT_NEW_ORDER);
+                if (rule != null) {
+                    Integer value = (Integer) engine.eval(rule.getRule());
+                    JSpinner priceSpinner = (JSpinner) tradingPanelHandler.getOWComponent(OrderWindowConstants.OWComponent.TRADING_PRICE);
+                    if (!priceSpinner.isEnabled()) {
+                        priceSpinner.setEnabled(true);
+                    }
+                    if (value == OrderWindowConstants.TRADE_AT_LAST_RULE_SUCCESS) {
+                        check = true;
+                        tradingPanelHandler.reFillOrderTypeCombo(check);
+                    } else {
+                        check = false;
+                        tradingPanelHandler.reFillOrderTypeCombo(check);
+                    }
+                }
+            } catch (Exception e) {
+                TradeCoreLogger.error(getClass(), "Error-Disable Market orders Trade At Last", e);
+            }
+
+            owComponentHandler.setSymbol(object);
+            actionHandler.sendQuoteRequests(object);
+
+            pricePanel.getSymbolSearchUI().setRequestFocusEnabled(false);
+
+            SwingUtilities.invokeLater(new Runnable() {
+                @Override
+                public void run() {
+                    pricePanel.getSymbolSearchUI().transferFocus();
+                    if (AppConfig.isShowAdvanceTab()) {
+                        try {
+
+                            tradingPanelHandler.getFocusOnConditionTypeComboBox();
+                        } catch (Exception e) {
+                            TradeCoreLogger.error(getClass(), "Error in Focus on ConditionTypecomboBox", e);
+                        }
+                    }
+                }
+            });
+
+            // get margin buying power
+            OrderWindowSharedActions.getSharedInstance().calcBrokerMarginBuyingPower(this);
+            setMarginBuyingPowerRequested();
+
+            tradingPanelHandler.validateGTDDate(object);
+        } else {    //clear all the fields
+            clearFields();
+        }
+
+        try {
+            setCustomFocusTraversalKey(currentFocusTraversalKey);
+        } catch (Exception ex) {
+            TradeCoreLogger.error(OrderWindow.class, "Error in setting travesal key", ex);
+        }
+
+        //calculate the maximum buyable quantity according to the buying power. will consider commission and vat for the calculation
+        calcMaxQuantity();
+
+        if (object != null) {
+            try {
+                calculateForBuyingPower();
+            } catch (Exception e) {
+                TradeCoreLogger.error(OrderWindow.class, "Error in Calculating shares for Buying Power", e);
+            }
+        }
+
+    }
+
+    public void calculateForBuyingPower() {
+        tradingPanelHandler.calculateForBuyingPower();
+    }
+
+    public void calculateForBuyingPowerPriceSpinner() {
+        tradingPanelHandler.calculateForBuyingPowerPriceSpinner();
+    }
+
+
+    public String getSymbolKey() {
+        if (oriSymbolKey == null || baseSymbolKey == null || !oriSymbolKey.equals(super.getSymbolKey())) {
+            oriSymbolKey = super.getSymbolKey();
+            if (oriSymbolKey != null) {
+                baseSymbolKey = SharedMethods.getBaseSymbolFromExchange(oriSymbolKey);
+            }
+        }
+        return baseSymbolKey;
+    }
+
+    public void calcMaxQuantity() {
+        try {
+            if (OrderWindowConstants.BUY_ACTION.equals(action)) {
+                tradingPanelHandler.calcMaxQuantity(); //do the functionality on a separate thread. ex: samba has done this
+            }
+        } catch (Exception ex) {
+            TradeCoreLogger.error(OrderWindow.class, "Error in calcMaxQuantity", ex);
+        }
+    }
+
+    private void sendMarginBuyingPower(SymbolSearchObject object) {
+        try {
+            String side = ((KeyValue<String>) getSidePanel().getSelectedComponentItem()).getKey();
+            String selectedPortfolio = ((KeyValue<String>) ((JComboBox) portfolioPanel.getOWComponent(OrderWindowConstants.OWComponent.TRADING_PORTFOLIO_NUMBER)).getSelectedItem()).getKey();
+            if (TradingUser.getSharedInstance().getPortfolioByID(selectedPortfolio).isMarginable() && OrderWindowConstants.BUY_ACTION.equals(side)) {
+                String accountNum = OrderWindowSharedMethods.getSharedInstance().getAccountNumber(selectedPortfolio);
+                String currency = "";
+                AccountSummery dataObject = AccountDataStore.getSharedInstance().getAccountOfPortfolio(selectedPortfolio);
+                if (dataObject != null) {
+                    currency = dataObject.getDefault_currency();
+                }
+                TradingConnection.getSharedInstance().requestBuyingPowerFromServer(null, selectedPortfolio, object.getSymbol(), object.getExchange(), accountNum, currency);
+            }
+        } catch (Exception e) {
+            TradeCoreLogger.error(OrderWindow.class, "Error-- margin enable send request fro the buying power", e);
+        }
+    }
+
+    public void reload(Object... params) {
+        if (!statusSet) {
+            reloadingParams = params;
+            return;
+        } else {
+            reloadingParams = null;
+        }
+        action = (String) params[0];   //action comes first
+
+        if (OrderWindowConstants.AMEND_ACTION.equals(action) || OrderWindowConstants.CANCEL_ACTION.equals(action) || OrderWindowConstants.SLICED_AMEND_PARENT_ACTION.equals(action) || OrderWindowConstants.SLICED_AMEND_CHILD_ACTION.equals(action)) {
+            isCancelOrAmendMode = true;
+            setVisibleQtyFiled(true);
+        }
+
+        if (OrderWindowConstants.AMEND_ACTION.equals(action)) {
+            if (params[1] instanceof OrderDataObject) {
+                orderDataObject = (OrderDataObject) params[1];
+            }
+            if (orderDataObject == null || !orderDataObject.isBasketOrder()) {
+                disableFields(BaseTradingPanel.EnableDisableFieldTypes.ALL);
+            } else {
+                disableFields(BaseTradingPanel.EnableDisableFieldTypes.ALGO_TYPE_ONLY);
+                disableConditionType(true);
+                enableAddToBasket(false);
+            }
+            //add Traversal policy to amend button
+            focusCycleBuySellChange(OrderWindowConstants.AMEND_ACTION);
+        } else if (OrderWindowConstants.CANCEL_ACTION.equals(action)) {
+            disableFields(BaseTradingPanel.EnableDisableFieldTypes.ALL);
+            disableFields(BaseTradingPanel.EnableDisableFieldTypes.CANCEL_ORDER);
+
+            if (orderDataObject != null && orderDataObject.isBasketOrder()) {
+                enableAddToBasket(false);
+            }
+
+            //add Traversal policy to cancel button
+            focusCycleBuySellChange(OrderWindowConstants.CANCEL_ACTION);
+        } else if (OrderWindowConstants.SLICED_AMEND_PARENT_ACTION.equals(action)) {
+            disableFields(BaseTradingPanel.EnableDisableFieldTypes.SLICE_PARENT);
+            //add Traversal policy to amend button
+            focusCycleBuySellChange(OrderWindowConstants.AMEND_ACTION);
+            action = OrderWindowConstants.AMEND_ACTION;
+        } else if (OrderWindowConstants.SLICED_AMEND_CHILD_ACTION.equals(action)) {
+            disableFields(BaseTradingPanel.EnableDisableFieldTypes.SLICE_CHILD);
+            //add Traversal policy to amend button
+            focusCycleBuySellChange(OrderWindowConstants.AMEND_ACTION);
+            action = OrderWindowConstants.AMEND_ACTION;
+        }
+        try {
+            if (params[1] instanceof OrderDataObject) {
+                orderDataObject = (OrderDataObject) params[1];
+                OrderWindowModel model1 = OrderWindowSharedActions.getSharedInstance().objectConvertToModel(orderDataObject);
+                SymbolSearchObject searchObject = SharedMethods.getSymbolSearchObject(model1.getSymbol(), model1.getExchange(), model1.getExchange(), true);
+                fireSymbolChanged(searchObject);
+                setAmendCancelData(model1);
+
+                if (AppConfig.isNCBC() && (orderDataObject.isBasketOrder() ||
+                        (orderDataObject.getBehaviourList() != null && orderDataObject.getBehaviourList().size() > 0))) {
+                    disableFields(BaseTradingPanel.EnableDisableFieldTypes.HIDE_ORD_NO_ONLY);
+                }
+                if (OrderWindowConstants.CANCEL_ACTION.equals(action)) {
+                    disableFields(BaseTradingPanel.EnableDisableFieldTypes.ALL_CONDITION);
+                }
+            } else if (params[1] instanceof OrderWindowModel) {  //Come from portfolio
+                OrderWindowModel model1 = (OrderWindowModel) params[1];
+                prevModel = model1;
+                SymbolSearchObject searchObject = SharedMethods.getSymbolSearchObject(model1.getSymbol(), model1.getExchange(), model1.getExchange(), true);
+                fireSymbolChanged(searchObject);
+                setLiquidateData(model1);
+            } else if (params[1] instanceof SymbolSearchObject) {      //came from watchlist
+                SymbolSearchObject symbolSearchObject = (SymbolSearchObject) params[1];
+                fireSymbolChanged(symbolSearchObject);
+                int side = OrderWindowSharedMethods.getSharedInstance().getSideValue(action);
+
+                tradingPanelHandler.setSymbolSearchData(side, symbolSearchObject, stockStore.get(symbolSearchObject.getSymbolKey()));
+            }
+        } catch (Exception e) {
+            TradeCoreLogger.error(OrderWindow.class, "Error- on block", e);
+        }
+
+        //change view according to the action.
+        CardLayout cl = (CardLayout) this.getBuySellButtonContainer().getLayout();
+        cl.show(this.getBuySellButtonContainer(), action);
+
+        if (getParentContainer() != null) {
+            getParentContainer().setPreferredSize(new Dimension(getComponentWidth(), getComponentHeight()));
+            getParentContainer().setBounds(getParentContainer().getLocation().x, getParentContainer().getLocation().y, getComponentWidth(), getComponentHeight());
+        }
+
+        if (params.length >= 3) {
+            try {
+                getPriceSpinnerTextField().setText(getNumberFormat().format(((Double) params[2]).doubleValue()));
+            } catch (Exception e) {
+                TradeCoreLogger.error(OrderWindow.class, "Error in setting price field", e);
+            }
+        }
+    }
+
+    private void setAmendCancelData(OrderWindowModel model) {
+        topPanel.setAmendCancelData(model);
+        portfolioPanel.setAmendCancelData(model);
+        pricePanel.setAmendCancelData(model);
+        tradingPanelHandler.setAmendCancelData(model);
+        tradeInfoPanel.setAmendCancelData(model);
+        owButtonPanel.setAmendCancelData(model);
+    }
+
+    private void setLiquidateData(OrderWindowModel model1) {
+        portfolioPanel.setLiquidateData(model1);
+        tradingPanelHandler.setLiquidateData(model1);
+    }
+
+    public String getSelectedPortfolio() {
+        if (getPortfolioCombo().getSelectedItem() != null) {
+            return ((KeyValue<String>) getPortfolioCombo().getSelectedItem()).getKey().trim();
+        }
+        return "";
+    }
+
+
+    public void disableFields(BaseTradingPanel.EnableDisableFieldTypes disableType) {
+        try {
+            topPanel.disableFields(disableType);
+            portfolioPanel.disableFields(disableType);
+            pricePanel.disableFields(disableType);
+            tradingPanelHandler.disableFields(disableType);
+            tradeInfoPanel.disableFields(disableType);
+            owButtonPanel.disableFields(disableType);
+        } catch (Exception ee) {
+            TradeCoreLogger.error(OrderWindow.class, "disableFields " + disableType.name(), ee);
+        }
+    }
+
+    public void enableFields(BaseTradingPanel.EnableDisableFieldTypes enableType) {
+        try {
+            topPanel.enableFields(enableType);
+            portfolioPanel.enableFields(enableType);
+            pricePanel.enableFields(enableType);
+            tradingPanelHandler.enableFields(enableType);
+            tradeInfoPanel.enableFields(enableType);
+            owButtonPanel.enableFields(enableType);
+        } catch (Exception ee) {
+            TradeCoreLogger.error(OrderWindow.class, "enableFields " + enableType.name(), ee);
+        }
+    }
+
+    private void disableConditionType(boolean isDisable) {
+        tradingPanelHandler.disableConditionType(isDisable);
+    }
+
+    private void setVisibleQtyFiled(boolean visible) {
+        tradingPanelHandler.setVisibleQtyFiled(visible);
+    }
+
+    private void commitAndFormatPriceSpinnerValue() {
+        try {
+            double price = Double.parseDouble(String.valueOf(getPriceSpinner().getValue()));
+            TradeCoreLogger.log(OrderWindow.class, "price: " + price);
+            String formatPrice = getNumberFormat().format(price);
+            getPriceSpinnerTextField().setText(formatPrice);
+            getPriceSpinnerTextField().commitEdit();
+        } catch (Exception e) {
+            TradeCoreLogger.error(OrderWindow.class, "Error-commitAndFormatPriceSpinnerValue " + getPriceSpinner().getValue(), e);
+        }
+    }
+
+    private void commitPriceSpinnerValue() {
+        try {
+            getPriceSpinnerTextField().commitEdit();
+        } catch (Exception e) {
+            TradeCoreLogger.error(OrderWindow.class, "Error-commitPriceSpinnerValue " + getPriceSpinner().getValue(), e);
+        }
+    }
+
+    public void getCommissionValues() {
+        getTheModel();
+
+        String portfolio = model.getPortfolio();
+        double price = model.getPrice();
+        long qty = model.getQty();
+        char orderType = model.getType();
+        double netPrice = price * qty;
+
+        if (Settings.getReleaseCode().equals(AppConfig.ReleaseCode.KSE.toString())) {
+            netPrice = netPrice / 1000;
+            ((StaticTradeDataLabel) tradeInfoPanel.getOWComponent(OrderWindowConstants.OWComponent.TRADING_ORDER_VALUE)).setUnformatedText(netPrice, DfnRenderingManger.getDecimalFormat(3));
+        } else {
+            ((StaticTradeDataLabel) tradeInfoPanel.getOWComponent(OrderWindowConstants.OWComponent.TRADING_ORDER_VALUE)).setUnformatedText(netPrice, decimalFormat2);
+        }
+
+        String key;
+        try {
+            key = CommissionDataStore.getSharedInstance().getCommissionKey(portfolio, stock.getExchange(), stock.getSymbol(), price, qty, getTheModel().getTiff(), getTheModel().getSide());
+        } catch (Exception e) {
+            key = "";
+        }
+
+        if (!SharedMethods.isNullOrEmptyString(key)) {
+            getCommission(key, price, qty, portfolio, orderType, netPrice);
+        }
+    }
+
+    private void getCommission(String key, Double price, long qty, String portfolio, char orderType, double netPrice) {
+        TradePrice priceObj = new TradePrice();
+        priceObj.setValue(netPrice);
+        if (!getTheModel().isSliceOrderAvailable() &&
+                CommissionDataStore.getSharedInstance().getCommissionObjectForKey(key) != null) { //get from datastore
+            TradeMessageDialog.setCommissionKey(key);
+            setNetValueType();
+        } else if (AppConfig.isCommissionCalculate() && price > 0 && qty > 0) {
+            try {
+                Interpreter interpreter = this.loadScriptEngine(-1);
+                Rule rule = RuleManager.getSharedInstance().getCommissionRule("*", stock.getExchange());
+                priceObj.setCommission((Double) interpreter.eval(rule.getRule()));
+            } catch (Exception e) {
+                TradeCoreLogger.error(getClass(), "Exception in Calcuating Commission", e);
+            }
+            try {
+                Rule rule = RuleManager.getSharedInstance().getRule(RuleManager.DFNRules.RULE_VAT_PERCENTAGE, stock.getExchange(), RuleManager.DFNRuleCategories.RULE_CAT_VAT);
+                Double vatPerc = Double.parseDouble(rule.getRule().split("=")[1]);
+                priceObj.setVatAmount(priceObj.getCommission() * vatPerc);
+            } catch (Exception e) {
+                TradeCoreLogger.error(getClass(), "Exception in Calcuating Vat", e);
+            }
+
+            TradeMessageDialog.setCommissionKey(key);
+            if (TradeMessageDialog.getCommissionKey().equals(key)) {
+                TradeMessageDialog.updateCommission(priceObj.getCommission());
+                TradeMessageDialog.updateVat(priceObj.getVatAmount());
+                if (model.getSide() == OrderWindowConstants.BUY_ACTION_VALUE) {
+                    TradeMessageDialog.updateNetValue(priceObj.getNetValueForBuy());
+                } else if (model.getSide() == OrderWindowConstants.SELL_ACTION_VALUE) {
+                    TradeMessageDialog.updateNetValue(priceObj.getNetValueForSell());
+                }
+            }
+            CommissionDataStore.getSharedInstance().addTradePriceObject(key, priceObj);
+        } else {
+            if (price > 0 && qty > 0) {
+                if (getTheModel().isSliceOrderAvailable()) {
+                    TradingConnection.getSharedInstance().requestCommissionFromServerWithSlice(portfolio, String.valueOf(orderType), price, qty, stock.getSymbol(), stock.getExchange(), 0, model.getSide(), model.isSliceOrderAvailable(), model.getExecType(), model.getBlocksize(), model.getTimeinterval(), model.getTiff(), model.getExpireDate(), stock.getMarketId());
+                } else {
+                    TradingConnection.getSharedInstance().requestCommissionFromServer(portfolio, String.valueOf(orderType), price, qty, stock.getSymbol(), stock.getExchange(), 0, model.getSide(), model.getTiff(), model.getExpireDate(), stock.getMarketId());
+                }
+            }
+            TradeMessageDialog.setCommissionKey(key);
+            setNetValueType();
+            CommissionDataStore.getSharedInstance().addTradePriceObject(key, priceObj);
+        }
+
+        model.setTradeKey(key);
+        tradeInfoPanel.setCustomKey(key);
+    }
+
+    private void setNetValueType() {
+        if (model.getSide() == OrderWindowConstants.BUY_ACTION_VALUE) {
+            TradeMessageDialog.setNetValueType(TradeDataStoreConstants.TRADE_PRICE_CONSTANT.NET_PRICE_BUY);
+        } else if (model.getSide() == OrderWindowConstants.SELL_ACTION_VALUE) {
+            TradeMessageDialog.setNetValueType(TradeDataStoreConstants.TRADE_PRICE_CONSTANT.NET_PRICE_SELL);
+        }
+    }
+
+    public Interpreter loadScriptEngine(int direction) throws Exception {
+        Interpreter engine = new Interpreter();
+
+        getTheModel();
+
+        int mktStatus = MarketSummeryDataStore.getSharedInstance().getMarketStatus(model.getExchange());
+        engine.set("symbol", model.getSymbol());
+        engine.set("instrumentType", model.getStock().getInstrumentType());
+        engine.set("sector", model.getStock().getSector());
+        engine.set("price", model.getPrice());
+        engine.set("quantity", model.getQty());
+        engine.set("min", getMinValue());
+        engine.set("max", getMaxValue());
+        engine.set("open", model.getStock().getDoubleValue("OPEN"));
+        engine.set("high", model.getStock().getDoubleValue("HIGH"));
+        engine.set("low", model.getStock().getDoubleValue("LOW"));
+        engine.set("side", model.getSide());
+        engine.set("tiff", model.getTiff());
+        engine.set("type", model.getType());
+        engine.set("disclosed", model.getDisClose());
+        engine.set("minfill", model.getMillFill());
+        engine.set("marketCode", model.getStock().getMarketId());  // ////
+        engine.set("refPrice", model.getStock().getDoubleValue("REFERENCE_VALUE"));  /////////
+        engine.set("bid", model.getStock().getDoubleValue("BEST_BID"));
+        engine.set("offer", model.getStock().getDoubleValue("BEST_ASK"));
+        engine.set("direction", direction);
+        engine.set("mktstatus", mktStatus);
+        engine.set("lotsize", model.getStock().getIntValue("LOT_SIZE"));
+
+        return engine;
+    }
+    private double getMinValue() {
+        try {
+            double value = 0;
+            double staticMin = model.getStock().getDoubleValue("STATIC_MIN_PRICE");
+            double min = model.getStock().getDoubleValue("MIN_PRICE");
+            if (staticMin != Double.NEGATIVE_INFINITY && staticMin > 0) {
+                value = staticMin;
+            } else {
+                value = min;
+            }
+            return value;
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
+    private double getMaxValue() {
+        try {
+            double value = 0;
+            double staticMax = model.getStock().getDoubleValue("STATIC_MAX_PRICE");
+            double max = model.getStock().getDoubleValue("MAX_PRICE");
+            if (staticMax != Double.NEGATIVE_INFINITY && staticMax > 0) {
+                value = staticMax;
+            } else {
+                value = max;
+            }
+            return value;
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
+    @Override
+    public int getComponentWidth() {
+        return isExpanded() ? EXPANDED_WIDTH : NORMAL_WIDTH;
+    }
+
+    @Override
+    public int getComponentHeight() {
+        int increment = 0;
+
+        increment += portfolioPanel.getExtraHeight();
+        increment += pricePanel.getExtraHeight();
+        increment += tradingPanelHandler.getExtraHeight();
+        increment += tradeInfoPanel.getExtraHeight();
+        increment += owButtonPanel.getExtraHeight();
+
+        if (isCancelOrAmendMode) {
+            increment += tradingPanelHandler.getAmendCancelHeight();
+        }
+
+        return NORMAL_HEIGHT + increment;
+    }
+
+    @Override
+    public void applyTheme() {
+        try {
+            super.applyTheme();
+            super.themechanged();
+            setBackgroundColor();
+            setFontColor();
+            changeImageIcon(((KeyValue<String>) getSidePanel().getSelectedComponentItem()).getKey());
+        } catch (Exception e) {
+            TradeCoreLogger.error(OrderWindow.class, "[applyTheme()]", e);
+        }
+    }
+
+    private void setBackgroundColor() {
+        changePanelColors(((KeyValue<String>) getSidePanel().getSelectedComponentItem()).getKey());
+    }
+
+    private void changeImageIcon(String action) {
+        try {
+            if (OrderWindowConstants.SELL_ACTION.equals(action)) {
+                ((JInternalFrame) this.getParentContainer()).setFrameIcon(Theme.getImageIcon("trade/sell.gif"));
+            } else if (OrderWindowConstants.BUY_ACTION.equals(action)) {
+                ((JInternalFrame) this.getParentContainer()).setFrameIcon(Theme.getImageIcon("trade/buy.gif"));
+            }
+        } catch (Exception e) {
+            TradeCoreLogger.error(OrderWindow.class, "Error--changeImageIcon", e);
+        }
+    }
+
+    @Override
+    public AbstractPlugin createFreshCopy(String id, String symbolKey) {
+        OrderWindow plugin = new OrderWindow();
+        plugin.setBeans(getPluginBean(), getConfigBean());
+        plugin.getPluginBean().setPluginID(id);
+        BasketOrdersPersistenceService.retrieve();
+
+        plugin.defaultState = (SavedOrderWindowProperties) WorkspaceContext.getDefaultState(id);
+        if (defaultState == null) {
+            plugin.loadDefaultConfiguration();
+        }
+        return plugin;
+    }
+
+    @Override
+    public void loadDefaultConfiguration() {
+        if (!SharedMethods.isNullOrEmptyString(getDefaultComponentName())) {
+            String defaultContent = WorkspaceContext.getCustomSettingsComponent(getDefaultComponentName()).getContent();
+            if (!SharedMethods.isNullOrEmptyString(defaultContent)) {
+                Gson gson = new Gson();
+                defaultState = gson.fromJson(defaultContent, SavedOrderWindowProperties.class);
+                WorkspaceContext.setDefaultState(getId(), defaultState);
+            }
+        }
+    }
+
+    @Override
+    public Object[] getStatus(StatusInvokeType invokeType) {
+        if (savedState == null) {
+            savedState = new SavedOrderWindowProperties();
+        }
+        savedState.setPortfolio((KeyValue<String>) getPortfolioCombo().getSelectedItem());
+        savedState.setCollapsed(!isExpanded);
+        savedState.setOrderType((KeyValue<Character>) getOrderTypeCombo().getSelectedItem());
+
+        return new Object[]{new Gson().toJson(savedState), getPluginId()};
+    }
+
+    public void tradeAccountSummeryDependableTasks() {
+        portfolioPanel.setDefaultPortfolio();
+    }
+
+    @Override
+    public void exitThread() {
+        //empty method
+    }
+
+    @Override
+    public void cleanUpData() {
+        clearFields();
+    }
+
+    public CollapsiblePane getRightPanel() {
+        return rightPanel;
+    }
+
+    @Override
+    public boolean isExpanded() {
+        return isExpanded;
+    }
+
+    @Override
+    public void setExpanded(boolean expanded) {
+        isExpanded = expanded;
+    }
+
+    public void changedCur(String cur) {
+        topPanel.changeCurrency(cur);
+    }
+
+    public Object[] getOrientationStatus(StatusInvokeType invokeType) {
+        if (savedState == null) {
+            savedState = defaultState;
+        }
+
+        savedState.setPortfolio((KeyValue<String>) getPortfolioCombo().getSelectedItem());
+        savedState.setCollapsed(rightPanel.isCollapsed());
+        savedState.setOrderType((KeyValue<Character>) getOrderTypeCombo().getSelectedItem());
+
+        return new Object[]{new Gson().toJson(savedState), getPluginId()};
+    }
+
+    @Override
+    public void setDefaultOrientation() {
+        Runnable runnable = new Runnable() {
+            public void run() {
+                String defaultComponentName = getDefaultComponentName();
+                if (!SharedMethods.isNullOrEmptyString(defaultComponentName)) {
+                    WorkSpaceComponent cmp = WorkspaceContext.getCustomSettingsComponent(defaultComponentName);
+                    Object[] currentStatus = getOrientationStatus(StatusInvokeType.DEFAULT_STATE);
+                    String content = "";
+                    if (currentStatus != null && currentStatus.length > 0) {
+                        content = (String) currentStatus[0];
+                        cmp.setContent(content);
+                        if (WorkspaceContext.getSavedPluginStore().containsKey(cmp.getId())) {
+                            WorkspaceContext.getSavedPlugin(cmp.getId()).setContent(content);
+                        }
+                    }
+                    WorkspaceContext.addDefautltSetting(getDefaultComponentName(), content);
+                    WorkSpaceLoader.getSharedInstance().saveExistingPlugin(cmp.getId(), content, -1);
+                    loadDefaultConfiguration();
+                }
+            }
+        };
+        new Thread(runnable, "setDefaultOrientation").start();
+    }
+
+    @Override
+    public ImageIcon getRightClickMenuImageIcon() {
+        if (WorkSpaceConstants.SELL_ORDER_WINDOW.equals(getPluginID())) {
+            return Theme.getImageIcon("trade/sell.gif");
+        } else if (WorkSpaceConstants.BUY_ORDER_WINDOW.equals(getPluginID())) {
+            return Theme.getImageIcon("trade/buy.gif");
+        } else {
+            return Theme.getImageIcon("");
+        }
+    }
+
+
+////////////////////////////////////////// traversal policy code
+
+    private void loadFocusCycleSettings() {
+        WorkSpaceComponent comp;
+        try {
+            Gson gson = new Gson();
+            comp = WorkspaceContext.getCustomSettingsComponent("ORDER_WINDOW_FOCUS_CYCLE_SETTINGS");
+            String data = comp.getContent();
+            String settings = gson.fromJson(data, String.class);
+            if (settings != null) {
+                this.currentComponentsFocusCycle.clear();
+                String[] tokens = settings.split(",");
+                for (String token : tokens) {
+                    currentComponentsFocusCycle.add(token);
+                }
+            } else {
+                saveFocusCycleSettings();
+            }
+        } catch (Exception e) {
+            TradeCoreLogger.error(OrderWindow.class, "Error--loadFocusCycleSettings", e);
+            saveFocusCycleSettings();
+        }
+    }
+
+    private void saveFocusCycleSettings() {
+        WorkSpaceComponent comp;
+        try {
+            comp = WorkspaceContext.getCustomSettingsComponent("ORDER_WINDOW_FOCUS_CYCLE_SETTINGS");
+            String settings = "";
+            for (String component : currentComponentsFocusCycle) {
+                settings = settings + component;
+                if (!component.equals(currentComponentsFocusCycle.getLast())) {
+                    settings = settings + ",";
+                }
+            }
+            comp.setContent(new Gson().toJson(settings));
+            WorkSpaceLoader.getSharedInstance().saveExistingPlugin(comp.getId(), comp.getContent(), -1);
+        } catch (Exception e) {
+            TradeCoreLogger.error(OrderWindow.class, "Error--saveFocusCycleSettings", e);
+        }
+    }
+
+    private void loadFocusTraversalKey() {
+        WorkSpaceComponent comp;
+        try {
+            Gson gson = new Gson();
+            comp = WorkspaceContext.getCustomSettingsComponent("ORDER_WINDOW_FOCUS_TRAVERSAL_KEY");
+            String data = comp.getContent();
+            Integer key = gson.fromJson(data, Integer.class);
+            currentFocusTraversalKey = key;
+        } catch (Exception e) {
+            saveFocusTraversalKey();
+            TradeCoreLogger.error(OrderWindow.class, "Error--loadFocusTraversalKey", e);
+        }
+    }
+
+    private void saveFocusTraversalKey() {
+        WorkSpaceComponent comp;
+        try {
+            comp = WorkspaceContext.getCustomSettingsComponent("ORDER_WINDOW_FOCUS_TRAVERSAL_KEY");
+            comp.setContent(new Gson().toJson(currentFocusTraversalKey));
+            WorkSpaceLoader.getSharedInstance().saveExistingPlugin(comp.getId(), comp.getContent(), -1);
+        } catch (Exception e) {
+            TradeCoreLogger.error(OrderWindow.class, "Error--saveFocusTraversalKey", e);
+        }
+    }
+
+    public void createComponentMap(String action) {
+        focusableComponentsMap = new HashMap<String, Component>();
+
+        pricePanel.setFocusCycle(focusableComponentsMap);
+        portfolioPanel.setFocusCycle(focusableComponentsMap);
+        tradingPanelHandler.setFocusCycle(focusableComponentsMap);
+        owButtonPanel.setButtonFocusCycle(focusableComponentsMap, action);
+
+        currentComponentsFocusCycle = new LinkedList<String>();
+        currentComponentsFocusCycle.add("TRADING_SYMBOL");
+        currentComponentsFocusCycle.add("TRADING_PRICE");
+        currentComponentsFocusCycle.add("TRADING_QUANTITY");
+        currentComponentsFocusCycle.add("TRADING_ACTION");
+
+        currentFocusTraversalKey = KeyEvent.VK_TAB;
+
+        marketComponentsFocusCycle = new LinkedList<String>(); //To create a defauolt componentFocusCycle for Market Orders
+        marketComponentsFocusCycle.add("TRADING_SYMBOL");
+        marketComponentsFocusCycle.add("TRADING_QUANTITY");
+        marketComponentsFocusCycle.add("TRADING_ACTION");
+    }
+
+    public void focusCycleBuySellChange(String action) {
+        try {
+            if (focusableComponentsMap != null) {
+                owButtonPanel.setButtonFocusCycle(focusableComponentsMap, action);
+            }
+            setCustomFocusTraversalPolicy(currentComponentsFocusCycle);
+        } catch (Exception e) {
+            TradeCoreLogger.error(OrderWindow.class, "focusCycleBuySellChange", e);
+        }
+    }
+
+    @Override
+    public HashMap<String, Component> getFocusableComponentsMap() {
+        return focusableComponentsMap;
+    }
+
+    @Override
+    public LinkedList<String> getCurrentComponentsFocusCycle() {
+        return currentComponentsFocusCycle;
+    }
+
+    @Override
+    public void setCurrentComponentsFocusCycle(LinkedList<String> currentComponentsFocusCycle) {
+        this.currentComponentsFocusCycle = currentComponentsFocusCycle;
+        saveFocusCycleSettings();
+    }
+
+    @Override
+    public int getCurrentFocusTraversalKey() {
+        return currentFocusTraversalKey;
+    }
+
+    @Override
+    public void setCurrentFocusTraversalKey(int currentFocusTraversalKey) {
+        this.currentFocusTraversalKey = currentFocusTraversalKey;
+        saveFocusTraversalKey();
+    }
+
+    /////////////////////////////////////////////////////////////////////////////
+
+    public void fireSpinnerValueTypedChange() {
+        calculateForBuyingPowerPriceSpinner();
+        commitPriceSpinnerValue();
+        getCommissionValues();
+        changeDisclosedTextField();
+    }
+
+    public void fireSpinnerValueChange() {
+        commitAndFormatPriceSpinnerValue();
+        getCommissionValues();
+        changeDisclosedTextField();
+    }
+
+    /*
+     **This method will be called by Spinner Listner. This will be closed even while keep pressing the spinner up/down keys.
+     * So no heavy work here.
+     */
+    @Override
+    public void fireSpinnerValueChange(JSpinner spinner) {
+        if (spinner.getModel() instanceof PriceSpinnerModel) {
+            commitAndFormatPriceSpinnerValue();
+        }
+    }
+
+    @Override
+    public void propertyChange(PropertyChangeEvent evt) {
+        //Set the priceSpinner value
+        try {
+            getPriceSpinner().setValue(Double.parseDouble(getPriceSpinnerTextField().getValue().toString()));
+
+            double value = Double.parseDouble(String.valueOf(getPriceSpinnerTextField().getValue()));
+
+            //If the value does not contain a decimal points, we can cast it to a long and set the value.
+            //This is done because otherwise the trailering .00 will be appeared in the field when typing
+            //Otherwise set the double value
+            if (value == (long) value) {
+                //If value is 0, set "" as the text.
+                //Otherwise set the long value
+                if (value != 0) {
+                    getPriceSpinnerTextField().setText(String.format("%d", (long) value));
+                } else {
+                    getPriceSpinnerTextField().setText("");
+                }
+            } else {
+                getPriceSpinnerTextField().setText(String.format("%s", value));
+            }
+        } catch (Exception e) {
+            TradeCoreLogger.error(OrderWindow.class, "Exception -> propertyChange", e);
+        }
+    }
+
+    public void clearFields() {
+        model = new OrderWindowModel();
+        prevModel = null;
+        model.setTradeKey("");
+
+        topPanel.clearFields();
+        portfolioPanel.clearFields();
+        pricePanel.clearFields();
+        tradingPanelHandler.clearFields();
+        tradeInfoPanel.clearFields();
+
+        if (!AppConfig.isSamba()) { //do not clear symbol for samba
+            changeSymbolKey("");
+            owComponentHandler.clearLists();
+        }
+    }
+
+    @Override
+    public OrderWindowModel getTheModel() {
+        if (stock != null) {
+            model = new OrderWindowModel();
+            model.setStock(stock);
+            model.setExchange(stock.getExchange());
+            model.setSymbol(stock.getSymbol());
+
+            portfolioPanel.setOrderModelData(model);
+
+            try {
+                model.setBrokerID(TradeUser.getSharedInstance().getTradingUser().getPortfolioByID(model.getPortfolio()).getBrokerID());
+            } catch (Exception e) {
+                TradeCoreLogger.error(OrderWindow.class, "Error--setBrokerID", e);
+            }
+
+            try {
+                model.setUserID(TradeUser.getSharedInstance().getTradingUser().getPortfolioByID(model.getPortfolio()).getUserID());
+            } catch (Exception e) {
+                TradeCoreLogger.error(OrderWindow.class, "Error--setUserID", e);
+            }
+
+            tradingPanelHandler.setOrderModelData(model);
+            tradeInfoPanel.setOrderModelData(model);
+
+            if (prevModel != null) {
+                model.setBasketName(prevModel.getBasketName());
+                model.setCreatedDate(prevModel.getCreatedDate());
+            }
+
+            if (orderDataObject != null) {
+                model.setIsBasketOrder(orderDataObject.isBasketOrder());
+                model.setBasketName(orderDataObject.getBasketName());
+                model.setOrderNum(orderDataObject.getOrderId());
+
+                model.setPendingQty(orderDataObject.getLeavesQuantity());
+                model.setFillQty(orderDataObject.getCumulativeQuantity());
+            }
+        } else {
+            model = new OrderWindowModel();
+        }
+        return model;
+    }
+
+    @Override
+    public boolean validateInputs() {
+        return validationLogicFactory.validate();
+    }
+
+    @Override
+    public void completed() {
+        try {
+            if (AppConfig.isSamba()) { // do not clear symbol
+                clearFields();
+            } else {
+                fireSymbolChanged(null);
+            }
+        } catch (Exception e) {
+            TradeCoreLogger.error(OrderWindow.class, "Error--completed", e);
+        }
+    }
+
+    @Override
+    public OrderDataObject getOrderDataObject() {
+        return orderDataObject;
+    }
+
+    public void enableAddToBasket(boolean doEnable) {
+        owButtonPanel.enableAddToBasket(doEnable);
+    }
+
+
+    public void selectMarketOrder() {
+        tradingPanelHandler.selectMarketOrder();
+    }
+
+    public void setMarginBuyingPowerRequested() {
+        try {
+            if (DataStoreFactory.getSharedFactory().getTradingPortfolioDataStore().getPortfolio(model.getPortfolio()).isMarginEnabled()) {
+                marginBuyingPowerRequested = true;
+            }
+        } catch (Exception e) {
+            TradeCoreLogger.error(OrderWindow.class, "Error setMarginBuyingPowerRequested", e);
+        }
+    }
+
+    public void enableDisableMAxQuantityBtn(boolean isEnable) {
+        tradingPanelHandler.enableDisableMAxQuantityBtn(isEnable);
+    }
+
+    public void changeTitle(String action) {
+        try {
+            if (OrderWindowConstants.SELL_ACTION.equals(action)) {
+                if (getSymbolSearchedObject() != null) {
+                    if (!TradeSharedMethods.isNullOrEmptyString(getSymbolSearchedObject().getSymbolKey())) {
+                        setTitle(Language.getString("SELL_ORDER_WINDOW") + " (" + SharedMethods.getSymbolFromKey(getSymbolSearchedObject().getSymbolKey()) + ") " + TicketDefinitionContext.getSharedInstance().getSymbolDescription(SharedMethods.getExchangeFromKey(getSymbolSearchedObject().getSymbolKey()), SharedMethods.getSymbolFromKey(getSymbolSearchedObject().getSymbolKey())));
+                    } else {
+                        setTitle(Language.getString("SELL_ORDER_WINDOW"));
+                    }
+                } else {
+                    setTitle(Language.getString("SELL_ORDER_WINDOW"));
+                }
+                ((JInternalFrame) this.getParentContainer()).setFrameIcon(Theme.getImageIcon("trade/sell.gif"));
+            } else if (OrderWindowConstants.BUY_ACTION.equals(action)) {
+                if (getSymbolSearchedObject() != null) {
+                    if (!TradeSharedMethods.isNullOrEmptyString(getSymbolSearchedObject().getSymbolKey())) {
+                        setTitle(Language.getString("BUY_ORDER_WINDOW") + " (" + SharedMethods.getSymbolFromKey(getSymbolSearchedObject().getSymbolKey()) + ") " + TicketDefinitionContext.getSharedInstance().getSymbolDescription(SharedMethods.getExchangeFromKey(getSymbolSearchedObject().getSymbolKey()), SharedMethods.getSymbolFromKey(getSymbolSearchedObject().getSymbolKey())));
+                    } else {
+                        setTitle(Language.getString("BUY_ORDER_WINDOW"));
+                    }
+                } else {
+                    setTitle(Language.getString("BUY_ORDER_WINDOW"));
+                }
+                ((JInternalFrame) this.getParentContainer()).setFrameIcon(Theme.getImageIcon("trade/buy.gif"));
+            }
+        } catch (Exception e) {
+            TradeCoreLogger.error(OrderWindow.class, "changeTitle", e);
+        }
+    }
+
+    private void setFontColor() {
+        pricePanel.setFontColor();
+        portfolioPanel.setFontColor();
+        tradingPanelHandler.setFontColor();
+        tradeInfoPanel.setFontColor();
+        owButtonPanel.setFontColor();
+    }
+
+    public boolean isCancelOrAmendMode() {
+        return isCancelOrAmendMode;
+    }
+
+    public void setAction(String action) {
+        this.action = action;
+    }
+
+    public String getAction() {
+        return this.action;
+    }
+
+    public TradingPanelHandler getTradingPanelHandler() {
+        return this.tradingPanelHandler;
+    }
+
+    public void changePrice(String action) {
+        if (stock != null) {
+            getPriceSpinner().setValue(actionHandler.getPriceField(action));
+            fireSpinnerValueTypedChange();
+        }
+    }
+
+    public Container getBuySellButtonContainer() {
+        return owButtonPanel.getBuySellButtonContainer();
+    }
+
+    public Container getBuySellTopContainer() {
+        return topPanel.getBuySellTopContainer();
+    }
+
+    public Container getTradeInfoLeftPanel() {
+        return tradeInfoPanel.getTradeInfoLeftPanel();
+    }
+
+    public Container getNetValueContainPanel() {
+        return tradeInfoPanel.getNetValueContainPanel();
+    }
+
+    public double getDefaultIncrement() {
+        try {
+            if (getSymbolSearchedObject() != null) {
+                int decimalCount = getSymbolSearchedObject().getDecimalCount();
+                return Math.pow(10, -decimalCount);
+            } else {
+                return 1;
+            }
+        } catch (Exception e) {
+            return 1;
+        }
+    }
+
+    public void setTickSize(double tickSize) {
+        ((PriceSpinnerModel) getPriceSpinner().getModel()).setUPTickSize(tickSize);
+    }
+
+    public void setLotSize(long lotSize) {
+        ((QuantitySpinnerModel) getQuantitySpinner().getModel()).setLotSize(lotSize);
+    }
+
+    public void changeFromDepth(boolean isbid, DataObject object) {
+        if (!isbid) {
+            getSidePanel().setSelectedComponentItem(OrderWindowSharedMethods.getSharedInstance().getSelectedSideItem(OrderWindowConstants.BUY_ACTION_VALUE));
+            if (((KeyValue<Character>) getOrderTypeCombo().getSelectedItem()).getKey() != OrderWindowConstants.MARKET_ORDER) {
+                getPriceSpinner().setValue(object.getDoubleValue("MBP_PRICE"));
+            }
+            action = OrderWindowConstants.BUY_ACTION;
+        } else {
+            getSidePanel().setSelectedComponentItem(OrderWindowSharedMethods.getSharedInstance().getSelectedSideItem(OrderWindowConstants.SELL_ACTION_VALUE));
+            if (((KeyValue<Character>) getOrderTypeCombo().getSelectedItem()).getKey() != OrderWindowConstants.MARKET_ORDER) {
+                getPriceSpinner().setValue(object.getDoubleValue("MBP_PRICE"));
+            }
+            action = OrderWindowConstants.SELL_ACTION;
+        }
+        SwingUtilities.invokeLater(new Runnable() {
+            @Override
+            public void run() {
+                getQtySpinnerTextField().requestFocus();
+            }
+        });
+    }
+
+    @Override
+    public String getPortfolioID() {
+        if (getPortfolioCombo().getSelectedItem() instanceof KeyValue) {
+            return ((KeyValue) getPortfolioCombo().getSelectedItem()).getKey().toString();
+        } else {
+            return getPortfolioCombo().getSelectedItem().toString();
+        }
+    }
+
+    private void addDatastoreObservers() {
+        DataStoreFactory.getSharedFactory().getMarginSymbolStore().addObserver(this);
+    }
+
+    public void changeDisclosedTextField() {
+        tradingPanelHandler.changeDisclosedTextField();
+    }
+
+    public JComboBox getPortfolioCombo() {
+        return (JComboBox) portfolioPanel.getOWComponent(OrderWindowConstants.OWComponent.TRADING_PORTFOLIO_NUMBER);
+    }
+
+    public JSpinner getPriceSpinner() {
+        return (JSpinner) tradingPanelHandler.getOWComponent(OrderWindowConstants.OWComponent.TRADING_PRICE);
+    }
+
+    public JSpinner getQuantitySpinner() {
+        return (JSpinner) tradingPanelHandler.getOWComponent(OrderWindowConstants.OWComponent.TRADING_QUANTITY);
+    }
+
+    private SidePanel getSidePanel() {
+        return (SidePanel) tradingPanelHandler.getOWComponent(OrderWindowConstants.OWComponent.TRADING_SIDE);
+    }
+
+    private JComboBox getOrderTypeCombo() {
+        return (JComboBox) tradingPanelHandler.getOWComponent(OrderWindowConstants.OWComponent.TRADING_ORDER_TYPE);
+    }
+
+    private JFormattedTextField getQtySpinnerTextField() {
+        return (JFormattedTextField) tradingPanelHandler.getOWComponent(OrderWindowConstants.OWComponent.TRADING_QTY_SPINNER_TXT);
+    }
+
+    private JFormattedTextField getPriceSpinnerTextField() {
+        return (JFormattedTextField) tradingPanelHandler.getOWComponent(OrderWindowConstants.OWComponent.TRADING_PRICE_SPINNER_TXT);
+    }
+
+    public JSpinner getStopLossValueSpinner() {
+        return (JSpinner) tradingPanelHandler.getOWComponent(OrderWindowConstants.OWComponent.TRADING_STOP_LOSS_SPINNER);
+    }
+
+
+    public JSpinner getTakeValueSpinner() {
+        return (JSpinner) tradingPanelHandler.getOWComponent(OrderWindowConstants.OWComponent.TRADING_TAKE_PROFIT_SPINNER);
+    }
+
+
+    public JTextField getDisclosedTextField() {
+        return (JTextField) tradingPanelHandler.getOWComponent(OrderWindowConstants.OWComponent.TRADING_DISCLOSED);
+    }
+
+    public ActionHandler getActionHandler() {
+        return actionHandler;
+    }
+
+    @Override
+    public void fireLinkSymbolChanged(SymbolSearchObject sso) {
+        fireSymbolChanged(sso);
+    }
+
+    @Override
+    public void setLinkGroup(String group) {
+        linkGroup = group;
+        getComponentObject().setLinkGroup(linkGroup);
+    }
+
+    @Override
+    public String getLinkGroup() {
+        return linkGroup;
+    }
+
+    @Override
+    public LinkSelectionCombo getLinkSelectionCombo() {
+        return getFeatureComponent().getLinkSelectionCombo();
+    }
+
+    @Override
+    public void update(DfnObservable o, Object args) {
+        if (o instanceof NCBMarginSymbolDataStore) {
+            if (args instanceof OrderDataObject) {
+                if (getQtySpinnerTextField() != null && maxQtyRequested) {
+                    getQtySpinnerTextField().setValue(((OrderDataObject) args).getOrderQuantity());
+                    fireSpinnerValueChange();
+                    maxQtyRequested = false;
+                } else if (!maxQtyRequested && marginBuyingPowerRequested) {
+                    if (!SharedMethods.isNullOrEmptyString(((OrderDataObject) args).getResponseReason())) {
+                        JOptionPane.showMessageDialog(this, ((OrderDataObject) args).getResponseReason());
+                    }
+                    marginBuyingPowerRequested = false;
+                }
+            }
+        }
+    }
+
+    @Override
+    public void tradeConnected() {
+        // This method use for refill the data
+        try {
+            if (getPortfolioCombo() != null) {
+                getPortfolioCombo().setModel(new DefaultComboBoxModel(OrderWindowSharedMethods.getSharedInstance().loadPortfolio()));
+            }
+        } catch (Exception e) {
+            TradeCoreLogger.error(getClass(), "tradeConnected", e);
+        }
+    }
+
+    @Override
+    public boolean isTradePlugin() {
+        return true;
+    }
+
+    public void changesDependOnSide(int side) {
+        topPanel.changesDependOnSide(side);
+        pricePanel.changesDependOnSide(side);
+        portfolioPanel.changesDependOnSide(side);
+        tradingPanelHandler.changesDependOnSide(side);
+        tradeInfoPanel.changesDependOnSide(side);
+    }
+
+    @Override
+    public boolean closePlugin() {
+        try {
+            SwingUtilities.invokeLater(new Runnable() {
+                @Override
+                public void run() {
+                    actionHandler.stopQuoteRequests(getSymbolSearchedObject());
+                }
+            });
+            owComponentHandler.clearLists();
+            KeyboardFocusManager.getCurrentKeyboardFocusManager().removeKeyEventDispatcher(dispatcher);
+            DataStoreFactory.getSharedFactory().getMarginSymbolStore().removeObserver(this);
+
+        } catch (Exception e) {
+            TradeCoreLogger.error(getClass(), "closePlugin", e);
+        }
+        return super.closePlugin();
+    }
+
+
+    public void changeSymbolKey(String symbolKey) {
+        super.changeSymbolKey(symbolKey);
+        if (!com.dfn.pro.tradedata.TradeSharedMethods.isNullOrEmptyString(symbolKey)) {
+            setTitle(Language.getString(getLanguageID()) + " (" + com.dfn.pro.shared.SharedMethods.getSymbolFromKey(symbolKey) + ") " + TicketDefinitionContext.getSharedInstance().getSymbolDescription(com.dfn.pro.shared.SharedMethods.getExchangeFromKey(symbolKey), com.dfn.pro.shared.SharedMethods.getSymbolFromKey(symbolKey)));
+        } else {
+            setTitle(Language.getString(getLanguageID()));
+        }
+
+        MinDataLabel minDataLabel = pricePanel.getMinDataLabel();
+        minDataLabel.setSymbolKey(symbolKey);
+
+        MaxDataLabel maxDataLabel = pricePanel.getMaxDataLabel();
+        maxDataLabel.setSymbolKey(symbolKey);
+
+    }
+
+    public void setInitialGoodTill(String exchange, OrderWindowModel model) {
+        tradingPanelHandler.setInitialGoodTill(exchange, model);
+    }
+
+    public void reFillTiffCombo(String exchange, OrderWindowModel model) {
+        tradingPanelHandler.reFillTiffCombo(exchange, model);
+    }
+
+    public void disableAllBracketOrderFields(boolean isDisable) {
+        tradingPanelHandler.disableAllBracketOrderFields(isDisable);
+    }
+
+    public void changeConditionTypeList(int type) {
+        tradingPanelHandler.changeConditionTypeList(type);
+    }
+
+    public int getDecimalPlaces() {
+        return decimalPlaces;
+    }
+
+    public void setDecimalPlaces(int decimalPlaces) {
+        this.decimalPlaces = decimalPlaces;
+    }
+
+    public void setMaxQtyRequested() {
+        maxQtyRequested = true;
+    }
+
+    public void setAdvSymbolSearchObj(SymbolSearchObject sso) {
+        tradingPanelHandler.setAdvSymbolSearchObj(sso);
+        SwingUtilities.invokeLater(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    tradingPanelHandler.getFocusOnConditionBooleanCombobox();
+                } catch (Exception e) {
+                    TradeCoreLogger.error(getClass(), "Error in Focus on ConditionBoolean ComboBox", e);
+                }
+
+            }
+        });
+
+    }
+
+    public NumberFormat getNumberFormat() {
+        return numberFormat;
+    }
+
+    public LinkedList<String> getMarketComponentsFocusCycle() {
+        return marketComponentsFocusCycle;
+    }
+
+    public void isVisibleBuyAllBuyingPower(boolean visible) {
+        tradingPanelHandler.isVisibleBuyAllBuyingPower(visible);
+    }
+
+    public void enableQuantitySpinner(boolean enable) {
+        tradingPanelHandler.enableQuantitySpinner(enable);
+    }
+
+    public void selectLimitOrder() {
+        tradingPanelHandler.selectLimitOrder();
+    }
+}
