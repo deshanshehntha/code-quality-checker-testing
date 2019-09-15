@@ -176,8 +176,11 @@ public class CommonConstants {
 
 	public static final String MULTI_LINE_COMMENT_END = "(?:.*)([*][/])+";
 	
-	//public static final String ALL_WORDS = "(?<=^([^\"]|\"[^\"]*\")*)(\\b\\w+\\b)";
+	// public static final String ALL_WORDS =
+	// "(?<=^([^\"]|\"[^\"]*\")*)(\\b\\w+\\b)";
 	public static final String ALL_WORDS = "\\w+(?=[^\"]*(\"[^\"]*\"[^\"]*)*$)";
+
+	public static final String IMPORT_STATMETN = "(import)\\s+[\\w]+.";
 
 	// ========================================================================================//
 
