@@ -13,6 +13,8 @@ public class CommonConstants {
 	private static final String MATCH_ELSE = "else.*?";
 	private static final String MATCH_RIGHT_CURLY_BRACKET = "[}]";
 
+	public static final String IMPORT_STATMETN = "(import)\\s+[\\w]+.";
+
 
 	private static final String MATCH_DOUBLE_OR = "[|][|]";
 	private static final String MATCH_DOUBLE_AND = "\\&&\\s";
